@@ -377,21 +377,15 @@ if __name__ == "__main__":
     # Configuration
     influencers = [
         {
-            "name": "Lisa Cheuk",
-            "email": "lisa@gmail.com",
-            "password": "password",
-            "linkedin_url": "https://www.linkedin.com/in/"
-        },
-        {
-            "name": "Morgana Lee",
-            "email": "morgana@gmail.com",
-            "password": "password",
-            "linkedin_url": "https://www.linkedin.com/in/"
+            "name": "Ahmed Tamer",
+            "email": "ahmedelkilany.rouge@gmail.com",
+            "password": "AGHK3684269",
+            "linkedin_url": "www.linkedin.com/in/ahmed-tamer-509353360"
         }
     ]
     
     # Select which influencer to use
-    selected_influencer = influencers[0]  # Change index to switch influencers
+    selected_influencer = influencers[0]
     
     # Initialize and run the bot
     bot = LinkedInBot(
@@ -405,7 +399,11 @@ if __name__ == "__main__":
     
     # Add some example KOL accounts for agricultural technology
     example_kols = [
-        
+        "https://www.linkedin.com/in/bill-gates/",
+        "https://www.linkedin.com/in/jimcramer/",
+        "https://www.linkedin.com/in/guyraz/",
+        "https://www.linkedin.com/in/richardbranson/",
+        "https://www.linkedin.com/in/aarontoel/"
     ]
     
     for kol in example_kols:
