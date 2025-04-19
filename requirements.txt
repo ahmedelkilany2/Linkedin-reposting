@@ -1,4 +1,5 @@
 pandas
-selenium
+requests
 schedule
-nltk
+urllib3
+python-dateutil
