@@ -1,5 +1,11 @@
-pandas
-requests
+selenium
+webdriver-manager
 schedule
-urllib3
-python-dateutil
+requests
+time
+json
+random
+logging
+datetime
+getpass
+os
