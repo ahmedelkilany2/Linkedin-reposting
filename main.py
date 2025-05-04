@@ -1,470 +1,401 @@
 import time
-import json
-import random
-import logging
-import schedule
-import requests
 import datetime
-import getpass
+import logging
+import json
 import os
+import requests
+import uuid
+import base64
+from urllib.parse import quote_plus
 from selenium import webdriver
 from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager
-from datetime import datetime, timedelta
+from selenium.common.exceptions import NoSuchElementException, TimeoutException, WebDriverException
+
+# Logging setup
+logging.getLogger()
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("linkedin_bot.log"),
+        logging.StreamHandler()
+    ]
+)
 
 class LinkedInBot:
-    def __init__(self, email, password, topics=None):
-        """
-        Initialize the LinkedIn automation bot
-        """
+    def __init__(self, email, password, access_token, search_query="agricultural technology"):
         self.email = email
         self.password = password
-        self.topics = topics if topics else ["agriculture technology innovation"]
+        self.access_token = access_token
+        self.search_query = search_query
         self.driver = None
-        self.cookies = None
-        self.daily_log = []
-        self.log_file = f"linkedin_activity_{datetime.now().strftime('%Y%m%d')}.json"
-        self.posts_done_today = 0
-        self.max_daily_posts = 15
-        self.setup_logging()
+        self.wait = None
+        self.history_file = 'engagement_history.json'
+        self.engagement_history = self._load_history()
+        self.image_dir = 'downloaded_images'
         
-    def setup_logging(self):
-        """Configure logging for the bot"""
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler("linkedin_bot.log"),
-                logging.StreamHandler()
-            ]
-        )
-        self.logger = logging.getLogger("LinkedInBot")
+        # Create images directory if it doesn't exist
+        if not os.path.exists(self.image_dir):
+            os.makedirs(self.image_dir)
+
+    def _load_history(self):
+        if os.path.exists(self.history_file):
+            try:
+                with open(self.history_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception as e:
+                logging.error(f"Failed loading history: {e}")
+        return {"posts": []}
+
+    def _save_history(self):
+        try:
+            with open(self.history_file, 'w', encoding='utf-8') as f:
+                json.dump(self.engagement_history, f, indent=4, ensure_ascii=False)
+        except Exception as e:
+            logging.error(f"Failed saving history: {e}")
 
     def setup_browser(self):
-        """Set up the Chrome browser for automation"""
-        try:
-            self.logger.info("Setting up Chrome browser")
-            chrome_options = Options()
-            
-            # Add options to make browser less detectable
-            chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-            chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-            chrome_options.add_experimental_option("useAutomationExtension", False)
-            
-            # Uncomment to run headless if needed
-            chrome_options.add_argument("--no-sandbox")
-            chrome_options.add_argument("--disable-dev-shm-usage")
-            chrome_options.add_argument("--disable-gpu")
-            chrome_options.add_argument("--window-size=1920,1080")
-            chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36")
-            
-            service = Service(ChromeDriverManager().install())
-            self.driver = webdriver.Chrome(service=service, options=chrome_options)
-            
-            # Override the navigator properties to prevent detection
-            self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-            
-            return True
-        except Exception as e:
-            self.logger.error(f"Browser setup failed: {str(e)}")
-            return False
+        options = webdriver.ChromeOptions()
+        options.add_argument("--start-maximized")
+        options.add_argument("--disable-notifications")
+        self.driver = webdriver.Chrome(options=options)
+        self.wait = WebDriverWait(self.driver, 15)
 
     def login(self):
-        """Log into LinkedIn using Selenium to handle security challenges"""
+        logging.info("Logging into LinkedIn via Selenium...")
+        self.driver.get("https://www.linkedin.com/login")
+        user = self.wait.until(EC.presence_of_element_located((By.ID, "username")))
+        pwd = self.wait.until(EC.presence_of_element_located((By.ID, "password")))
+        user.send_keys(self.email)
+        pwd.send_keys(self.password)
+        pwd.send_keys(Keys.RETURN)
+        time.sleep(50)  # Wait for login to complete
         try:
-            if not self.driver and not self.setup_browser():
-                return False
-                
-            self.logger.info("Attempting to login to LinkedIn via browser")
-            self.driver.get("https://www.linkedin.com/login")
-            
-            # Wait for the page to load
-            time.sleep(3)
-            
-            # Enter email
-            email_field = self.driver.find_element(By.ID, "username")
-            email_field.clear()
-            email_field.send_keys(self.email)
-            
-            # Enter password
-            password_field = self.driver.find_element(By.ID, "password")
-            password_field.clear()
-            password_field.send_keys(self.password)
-            
-            # Click login button
-            login_button = self.driver.find_element(By.XPATH, "//button[@type='submit']")
-            login_button.click()
-            
-            # Wait for login to complete
-            time.sleep(5)
-            
-            # To solve a verification challenge
-            if "checkpoint" in self.driver.current_url or "challenge" in self.driver.current_url:
-                self.logger.warning("LinkedIn security challenge detected")
-                print("\nLinkedIn security challenge detected. Please complete the verification in the browser window.")
-                print("The program will continue once you've completed the verification.")
-                
-                # Wait for user to solve the challenge
-                input("Press Enter once you've completed the verification in the browser...")
-            
-            # Check if login was successful
-            if "feed" in self.driver.current_url:
-                self.logger.info("Successfully logged in to LinkedIn")
-                
-                # Save cookies for future use
-                self.cookies = self.driver.get_cookies()
-                with open("linkedin_cookies.json", "w") as f:
-                    json.dump(self.cookies, f)
-                
-                return True
-            else:
-                self.logger.error("Failed to log in to LinkedIn")
-                return False
-                
-        except Exception as e:
-            self.logger.error(f"Login failed: {str(e)}")
-            return False
-
-    def search_posts(self, topic, count=20):
-        """Search for relevant LinkedIn posts on a specific topic"""
-        try:
-            self.logger.info(f"Searching for posts about: {topic}")
-            
-            # Navigate to LinkedIn search page
-            search_url = f"https://www.linkedin.com/search/results/content/?keywords={topic.replace(' ', '%20')}&origin=GLOBAL_SEARCH_HEADER&sortBy=relevance"
-            self.driver.get(search_url)
-            
-            # Wait for search results to load
-            time.sleep(5)
-            
-            # Find post containers
-            posts = self.driver.find_elements(By.XPATH, "//div[contains(@class, 'feed-shared-update-v2')]")
-            
-            if not posts:
-                self.logger.warning(f"No posts found for topic: {topic}")
-                return []
-                
-            self.logger.info(f"Found {len(posts)} posts for topic: {topic}")
-            
-            # Extract posts data
-            posts_data = []
-            for post in posts[:min(count, len(posts))]:
-                try:
-                    # Extract post ID
-                    post_id = post.get_attribute("data-urn")
-                    
-                    # Extract post text
-                    post_text_element = post.find_elements(By.XPATH, ".//div[contains(@class, 'feed-shared-update-v2__description-wrapper')]//span")
-                    post_text = " ".join([elem.text for elem in post_text_element]) if post_text_element else ""
-                    
-                    # Extract engagement stats
-                    likes_element = post.find_elements(By.XPATH, ".//span[contains(@class, 'social-details-social-counts__reactions-count')]")
-                    likes = int(likes_element[0].text.replace(',', '')) if likes_element else 0
-                    
-                    comments_element = post.find_elements(By.XPATH, ".//li[contains(@class, 'social-details-social-counts__comments')]//span")
-                    comments = int(comments_element[0].text.replace(',', '')) if comments_element else 0
-                    
-                    # Extract author info
-                    author_element = post.find_elements(By.XPATH, ".//span[contains(@class, 'feed-shared-actor__name')]")
-                    author = author_element[0].text if author_element else "Unknown"
-                    
-                    # Extract post URL
-                    post_url_element = post.find_elements(By.XPATH, ".//a[contains(@class, 'app-aware-link') and contains(@href, '/posts/')]")
-                    post_url = post_url_element[0].get_attribute("href") if post_url_element else None
-                    
-                    # Add to posts data if it has good engagement
-                    if likes > 10 or comments > 5:
-                        posts_data.append({
-                            "id": post_id,
-                            "text": post_text,
-                            "author": author,
-                            "likes": likes,
-                            "comments": comments,
-                            "url": post_url
-                        })
-                        
-                except Exception as e:
-                    self.logger.error(f"Error extracting post data: {str(e)}")
-                    continue
-            
-            self.logger.info(f"Extracted data for {len(posts_data)} relevant posts")
-            return posts_data
-            
-        except Exception as e:
-            self.logger.error(f"Error searching posts: {str(e)}")
-            return []
-
-    def generate_comment(self, post_content):
-        """Generate a relevant comment based on the post content"""
-        # Simple comment templates
-        templates = [
-            "Great insights on {topic}! This is definitely going to shape the future of the industry.",
-            "I found this perspective on {topic} quite interesting. What are your thoughts?",
-            "The innovations in {topic} mentioned here are truly game-changing for businesses.",
-            "This is exactly the kind of advancement in {topic} that we need to be focusing on.",
-            "Sharing this because it highlights important trends in {topic} that we should all be aware of.",
-            "Fascinating development in {topic}. I'm curious to see how this evolves further.",
-            "Important information for anyone working with {topic}.",
-            "This approach to {topic} could revolutionize how we think about solutions in this space."
-        ]
-        
-        # Extract topic from post or use default
-        if not post_content or len(post_content) < 10:
-            topic = random.choice(self.topics)
-        else:
-            # Use the first topic that appears in the content, or default
-            topic = next((t for t in self.topics if t.lower() in post_content.lower()), random.choice(self.topics))
-            
-        comment = random.choice(templates).format(topic=topic)
-        return comment
-
-    def repost(self, post):
-        """Repost a LinkedIn post with a comment"""
-        try:
-            post_url = post.get("url")
-            if not post_url:
-                self.logger.warning("Missing post URL, cannot repost")
-                return False
-                
-            # Generate comment
-            comment = self.generate_comment(post.get("text", ""))
-            self.logger.info(f"Reposting content with comment: {comment[:50]}...")
-            
-            # Navigate to the post
-            self.driver.get(post_url)
-            time.sleep(5)
-            
-            # Click on share button
-            share_button = WebDriverWait(self.driver, 10).until(
-                EC.element_to_be_clickable((By.XPATH, "//button[contains(@class, 'share-button')]"))
-            )
-            share_button.click()
-            time.sleep(2)
-            
-            # Click on "Repost" option
-            repost_button = WebDriverWait(self.driver, 10).until(
-                EC.element_to_be_clickable((By.XPATH, "//div[contains(@class, 'feed-shared-control-menu__item') and contains(., 'Repost')]"))
-            )
-            repost_button.click()
-            time.sleep(2)
-            
-            # Add comment
-            comment_field = WebDriverWait(self.driver, 10).until(
-                EC.element_to_be_clickable((By.XPATH, "//div[contains(@class, 'editor-content')]"))
-            )
-            comment_field.send_keys(comment)
-            time.sleep(2)
-            
-            # Click post button
-            post_button = WebDriverWait(self.driver, 10).until(
-                EC.element_to_be_clickable((By.XPATH, "//button[contains(@class, 'share-actions__primary-action')]"))
-            )
-            post_button.click()
-            time.sleep(5)
-            
-            # Log the activity
-            activity = {
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "action": "repost",
-                "post_url": post_url,
-                "comment": comment,
-                "success": True
-            }
-            
-            self.daily_log.append(activity)
-            self.posts_done_today += 1
-            self.save_log()
-            
-            self.logger.info("Repost successful")
+            self.wait.until(EC.presence_of_element_located((By.ID, "global-nav")))
+            logging.info("Selenium login successful")
             return True
-            
-        except Exception as e:
-            self.logger.error(f"Error reposting: {str(e)}")
-            
-            # Log the failed attempt
-            activity = {
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "action": "repost",
-                "post_url": post.get("url", "unknown"),
-                "error": str(e),
-                "success": False
-            }
-            self.daily_log.append(activity)
-            self.save_log()
-            
+        except TimeoutException:
+            logging.error("Selenium login failed")
             return False
 
-    def save_log(self):
-        """Save the daily activity log to a file"""
+    def find_top_post(self):
+        encoded = quote_plus(self.search_query)
+        url = f"https://www.linkedin.com/search/results/content/?keywords={encoded}"
+        logging.info(f"Searching for: {self.search_query}")
+        self.driver.get(url)
+        time.sleep(5)
+        for _ in range(5):
+            self.driver.execute_script("window.scrollBy(0, 800)")
+            time.sleep(1)
+        posts = self.driver.find_elements(By.CSS_SELECTOR, "div.feed-shared-update-v2")
+        best, best_score = None, -1
+        for p in posts:
+            try:
+                pid = p.get_attribute('data-urn') or p.get_attribute('id')
+                if pid in (x['post_id'] for x in self.engagement_history['posts']):
+                    continue
+                # reactions
+                try:
+                    r = p.find_element(By.XPATH, ".//button[contains(@aria-label,'reactions')]/span").text
+                    rc = int(''.join(filter(str.isdigit, r)))
+                except Exception:
+                    rc = 0
+                # comments
+                try:
+                    c = p.find_element(By.XPATH, ".//button[contains(@aria-label,'comment')]/span").text
+                    cc = int(''.join(filter(str.isdigit, c)))
+                except Exception:
+                    cc = 0
+                score = rc + cc
+                if score > best_score:
+                    best, best_score = p, score
+            except Exception:
+                continue
+        return best
+
+    def download_images(self, post):
+        """Extract and download images from the post"""
+        image_paths = []
         try:
-            with open(self.log_file, 'w') as f:
-                json.dump({
-                    "date": datetime.now().strftime("%Y-%m-%d"),
-                    "posts_completed": self.posts_done_today,
-                    "max_daily_posts": self.max_daily_posts,
-                    "activities": self.daily_log
-                }, f, indent=2)
-            self.logger.info(f"Log saved to {self.log_file}")
+            # Find all images in the post
+            images = post.find_elements(By.CSS_SELECTOR, "div.feed-shared-image__container img, li.artdeco-carousel__slide img")
+            
+            if not images:
+                logging.info("No images found in the post")
+                return []
+            
+            logging.info(f"Found {len(images)} images in the post")
+            
+            # Download each image
+            for i, img in enumerate(images):
+                try:
+                    img_url = img.get_attribute('src')
+                    # Skip LinkedIn default icons/avatars
+                    if not img_url or 'data:image' in img_url or 'ghost-person' in img_url:
+                        continue
+                    
+                    # Generate a unique filename
+                    img_filename = f"{self.image_dir}/{uuid.uuid4()}.jpg"
+                    
+                    # Download the image
+                    response = requests.get(img_url, stream=True)
+                    if response.status_code == 200:
+                        with open(img_filename, 'wb') as f:
+                            for chunk in response.iter_content(1024):
+                                f.write(chunk)
+                        image_paths.append(img_filename)
+                        logging.info(f"Downloaded image: {img_filename}")
+                    else:
+                        logging.error(f"Failed to download image: {response.status_code}")
+                except Exception as e:
+                    logging.error(f"Error downloading image: {e}")
+            
+            return image_paths
         except Exception as e:
-            self.logger.error(f"Error saving log: {str(e)}")
-
-    def distribute_posting_times(self, start_hour=8, end_hour=20):
-        """Create a schedule of posting times throughout the day"""
-        now = datetime.now()
-        current_hour = now.hour
-        current_minute = now.minute
-        
-        # Adjust for current time
-        if current_hour < start_hour:
-            start_hour = current_hour
-        if current_hour > end_hour:
-            # Too late in the day, schedule for tomorrow
+            logging.error(f"Error extracting images: {e}")
             return []
-            
-        # Determine how many hours are left in the posting window
-        hours_left = end_hour - max(current_hour, start_hour) + 1
-        if hours_left <= 0:
-            return []
-            
-        # Calculate posts per hour, minimum 1
-        posts_left = min(self.max_daily_posts - self.posts_done_today, 15)
-        if posts_left <= 0:
-            return []
-            
-        posts_per_hour = max(1, min(posts_left // hours_left, 3))  # Cap at 3 posts per hour
-        
-        # Create schedule
-        schedule = []
-        for hour in range(max(current_hour, start_hour), end_hour + 1):
-            # Skip current hour if we're more than 45 minutes into it
-            if hour == current_hour and current_minute > 45:
-                continue
-                
-            # Distribute evenly within the hour
-            for i in range(min(posts_per_hour, posts_left)):
-                if hour == current_hour:
-                    # For current hour, schedule after current time
-                    minute = random.randint(current_minute + 5, 59)
-                else:
-                    minute = random.randint(0, 59)
-                
-                schedule_time = now.replace(hour=hour, minute=minute, second=random.randint(0, 59))
-                schedule.append(schedule_time)
-                posts_left -= 1
-                
-                if posts_left <= 0:
-                    break
-            
-            if posts_left <= 0:
-                break
-                
-        # Sort by time
-        schedule.sort()
-        return schedule
 
-    def run_daily_routine(self):
-        """Execute the daily posting routine"""
-        self.logger.info("Starting daily routine")
-        
-        # Reset daily counter if it's a new day
-        current_date = datetime.now().strftime('%Y%m%d')
-        if self.log_file != f"linkedin_activity_{current_date}.json":
-            self.log_file = f"linkedin_activity_{current_date}.json"
-            self.posts_done_today = 0
-            self.daily_log = []
-        
-        # Login if not already
-        if not self.driver:
-            if not self.login():
-                self.logger.error("Daily routine cancelled: Could not login")
-                return
-
-        # Schedule posts throughout the day
-        posting_schedule = self.distribute_posting_times()
-        self.logger.info(f"Created schedule for {len(posting_schedule)} posts today")
-        
-        for scheduled_time in posting_schedule:
-            # Select a random topic
-            topic = random.choice(self.topics)
+    def upload_image_to_linkedin(self, image_path):
+        """Upload an image to LinkedIn and get the asset ID"""
+        try:
+            # Register the upload
+            register_headers = {
+                'Authorization': f'Bearer {self.access_token}',
+                'Content-Type': 'application/json',
+                'X-Restli-Protocol-Version': '2.0.0'
+            }
             
-            # Collect posts about this topic
-            posts = self.search_posts(topic)
+            register_data = {
+                "registerUploadRequest": {
+                    "recipes": ["urn:li:digitalmediaRecipe:feedshare-image"],
+                    "owner": "urn:li:person:uuser_id",  # Replace with your LinkedIn user ID
+                    "serviceRelationships": [
+                        {
+                            "relationshipType": "OWNER",
+                            "identifier": "urn:li:userGeneratedContent"
+                        }
+                    ]
+                }
+            }
             
-            if not posts:
-                self.logger.warning(f"No posts found for topic: {topic}")
-                continue
+            register_url = "https://api.linkedin.com/v2/assets?action=registerUpload"
+            register_resp = requests.post(register_url, headers=register_headers, json=register_data)
+            
+            if register_resp.status_code != 200:
+                logging.error(f"Failed to register image upload: {register_resp.status_code} {register_resp.text}")
+                return None
+            
+            # Extract upload URL and asset ID
+            upload_data = register_resp.json()
+            upload_url = upload_data.get('value', {}).get('uploadMechanism', {}).get('com.linkedin.digitalmedia.uploading.MediaUploadHttpRequest', {}).get('uploadUrl')
+            asset_id = upload_data.get('value', {}).get('asset')
+            
+            if not upload_url or not asset_id:
+                logging.error("Failed to get upload URL or asset ID")
+                return None
+            
+            # Upload the image binary
+            with open(image_path, 'rb') as image_file:
+                image_data = image_file.read()
                 
-            # Select a post with good engagement
-            selected_post = random.choice(posts[:min(5, len(posts))])
+            upload_resp = requests.put(
+                upload_url,
+                data=image_data,
+                headers={
+                    'Authorization': f'Bearer {self.access_token}'
+                }
+            )
             
-            # Schedule the repost
-            delay_seconds = (scheduled_time - datetime.now()).total_seconds()
-            if delay_seconds > 0:
-                self.logger.info(f"Scheduled post for {scheduled_time.strftime('%H:%M:%S')} (in {delay_seconds/60:.1f} minutes)")
-                time.sleep(delay_seconds)
-            
-            # Repost
-            success = self.repost(selected_post)
-            
-            if success:
-                self.logger.info(f"Posted {self.posts_done_today}/{self.max_daily_posts} for today")
-            
-            # If we've reached the daily limit, stop
-            if self.posts_done_today >= self.max_daily_posts:
-                self.logger.info(f"Reached daily posting limit of {self.max_daily_posts}")
-                break
+            if upload_resp.status_code not in (200, 201):
+                logging.error(f"Failed to upload image: {upload_resp.status_code} {upload_resp.text}")
+                return None
                 
-            # Small sleep to avoid rate limiting
-            time.sleep(random.uniform(30, 60))
+            logging.info(f"Successfully uploaded image, asset ID: {asset_id}")
+            return asset_id
+            
+        except Exception as e:
+            logging.error(f"Error uploading image: {e}")
+            return None
 
-    def cleanup(self):
-        """Clean up resources"""
+    def create_post_with_images_api(self, text, image_paths):
+        """Create a LinkedIn post with text and images using the API"""
+        # First upload all images and collect their asset IDs
+        image_assets = []
+        for img_path in image_paths:
+            asset_id = self.upload_image_to_linkedin(img_path)
+            if asset_id:
+                image_assets.append(asset_id)
+        
+        headers = {
+            'Authorization': f'Bearer {self.access_token}',
+            'Content-Type': 'application/json',
+            'X-Restli-Protocol-Version': '2.0.0'
+        }
+        
+        # Construct the post body based on whether we have images
+        if image_assets:
+            # Post with images
+            media_items = []
+            for i, asset in enumerate(image_assets):
+                media_items.append({
+                    "status": "READY",
+                    "description": {
+                        "text": f"Image {i+1}"
+                    },
+                    "media": asset,
+                    "title": {
+                        "text": f"Image {i+1}"
+                    }
+                })
+            
+            body = {
+                "author": "urn:li:person:uuser_id",  # Replace with your LinkedIn user ID
+                "lifecycleState": "PUBLISHED",
+                "specificContent": {
+                    "com.linkedin.ugc.ShareContent": {
+                        "shareCommentary": {
+                            "text": text
+                        },
+                        "shareMediaCategory": "IMAGE",
+                        "media": media_items
+                    }
+                },
+                "visibility": {
+                    "com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC"
+                }
+            }
+        else:
+            # Text-only post
+            body = {
+                "author": "urn:li:person:uuser_id",  # Replace with your LinkedIn user ID
+                "lifecycleState": "PUBLISHED",
+                "specificContent": {
+                    "com.linkedin.ugc.ShareContent": {
+                        "shareCommentary": {
+                            "text": text
+                        },
+                        "shareMediaCategory": "NONE"
+                    }
+                },
+                "visibility": {
+                    "com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC"
+                }
+            }
+        
+        resp = requests.post('https://api.linkedin.com/v2/ugcPosts', headers=headers, json=body)
+        if resp.status_code == 201:
+            logging.info("API post created successfully with images")
+            # Clean up downloaded images after posting
+            for img_path in image_paths:
+                try:
+                    os.remove(img_path)
+                    logging.info(f"Deleted temporary image: {img_path}")
+                except:
+                    pass
+            return True
+        
+        logging.error(f"API post failed: {resp.status_code} {resp.text}")
+        return False
+
+    def get_author_details(self, post):
+        """Get more complete author details from the post"""
+        try:
+            # Get author name
+            author_name = post.find_element(By.CSS_SELECTOR, 
+                "div.update-components-actor__meta span.update-components-actor__title span").text
+            
+            # Get author headline/title if available
+            try:
+                author_title = post.find_element(By.CSS_SELECTOR, 
+                    "div.update-components-actor__meta span.update-components-actor__description").text
+            except:
+                author_title = ""
+                
+            # Get author profile URL if available
+            try:
+                author_link = post.find_element(By.CSS_SELECTOR, 
+                    "div.update-components-actor__meta a.app-aware-link").get_attribute("href")
+                # Extract just the profile name
+                if '/in/' in author_link:
+                    profile_name = author_link.split('/in/')[1].split('/')[0]
+                    author_link = f"linkedin.com/in/{profile_name}"
+            except:
+                author_link = ""
+                
+            author_detail = f"{author_name}"
+            if author_title:
+                author_detail += f", {author_title}"
+            if author_link:
+                author_detail += f" (linkedin.com/in/{profile_name})"
+                
+            return author_detail
+            
+        except Exception as e:
+            logging.error(f"Error getting author details: {e}")
+            return "Unknown LinkedIn User"
+
+    def repost_once(self):
+        post = self.find_top_post()
+        if not post:
+            logging.info("No post found to repost")
+            return
+        
+        pid = post.get_attribute('data-urn') or post.get_attribute('id')
+        
+        # Get detailed author information
+        author_info = self.get_author_details(post)
+        
+        # Expand text if needed
+        try:
+            btn = post.find_element(By.CSS_SELECTOR, ".feed-shared-inline-show-more-text__see-more-less-toggle")
+            self.driver.execute_script("arguments[0].click();", btn)
+            time.sleep(0.5)
+        except NoSuchElementException:
+            pass
+            
+        # Get post text
+        try:
+            body = post.find_element(By.CSS_SELECTOR,
+                "div.feed-shared-update-v2__description span.break-words").text
+        except Exception:
+            body = ""
+            
+        # Format content with clear author attribution
+        content = f"Repost from {author_info}:\n\n{body}"
+        content = ''.join(ch for ch in content if ord(ch) <= 0xFFFF)
+        
+        # Get images from the post
+        image_paths = self.download_images(post)
+        
+        # Create post with images
+        if self.create_post_with_images_api(content, image_paths):
+            now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self.engagement_history['posts'].append({
+                'post_id': pid, 
+                'author': author_info, 
+                'timestamp': now,
+                'has_images': len(image_paths) > 0
+            })
+            self._save_history()
+            logging.info(f"Successfully reposted content from {author_info} with {len(image_paths)} images")
+        else:
+            logging.error("Failed to repost content")
+
+    def close(self):
         if self.driver:
             self.driver.quit()
 
-def main():
-    # Initialize the bot with your credentials
-    bot = LinkedInBot(
-        email="ahmedelkilany.rouge@gmail.com",
-        password="AGHK3684269",
-        topics=[
-            "agriculture technology innovation", 
-            "agritech", 
-            "sustainable agriculture", 
-            "farming technology",
-            "precision agriculture",
-            "agricultural AI",
-            "smart farming"
-        ]
-    )
-    
+if __name__ == '__main__':
+    EMAIL = 'email'
+    PASSWORD = 'password'
+    TOKEN = 'access_token'  # Replace with your LinkedIn API access token
+    bot = LinkedInBot(EMAIL, PASSWORD, TOKEN)
     try:
-        # Log in immediately
-        if not bot.login():
-            print("Failed to login. Please check the browser window to complete any security challenges.")
-            return
-        
-        # Run once immediately
-        bot.run_daily_routine()
-        
-        # Schedule to run every day at 8:00 AM
-        schedule.every().day.at("08:00").do(bot.run_daily_routine)
-        
-        print("Bot is running. Press Ctrl+C to stop.")
-        
-        # Keep the script running
-        while True:
-            schedule.run_pending()
-            time.sleep(60)
-            
-    except KeyboardInterrupt:
-        print("\nBot stopped by user.")
+        bot.setup_browser()
+        if bot.login():
+            bot.repost_once()
     finally:
-        bot.cleanup()
-
-if __name__ == "__main__":
-    main()
+        bot.close()
