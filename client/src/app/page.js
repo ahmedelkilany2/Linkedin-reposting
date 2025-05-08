@@ -15,7 +15,7 @@ export default function LinkedinHomepage() {
 
   return (
 
-    <div className="flex min-h-full flex-1 flex-col justify-center px-6 py-12 lg:px-8 bg-gray-100">
+    <div className="flex min-h-full flex-1 flex-col justify-center px-6 py-20 lg:px-8 bg-gray-100">
       <div className="sm:mx-auto sm:w-full sm:max-w-sm">
       <Image
             alt="Your Company"
@@ -24,18 +24,18 @@ export default function LinkedinHomepage() {
             height={500}
             className="mx-auto h-10 w-auto"
           />
-        <h2 className="mt-10 text-center text-2xl/9 font-bold tracking-tight text-gray-900">
+        <h2 className="mt-6 text-center text-2xl/9 font-bold tracking-tight text-gray-900">
           LinkedIn Automation Tool
         </h2>
       </div>
-      <h4 className=" mt-4 text-center text-lg font-bold tracking-tight text-gray-900">
+      <h4 className="mt-3 text-center text-lg font-bold tracking-tight text-gray-900">
         Automatically find trending LinkedIn posts, generate fresh content, and publish it to your profile—no writing, no hassle, just results.
       </h4>
 
       <div className="mt-10 sm:mx-auto sm:w-full sm:max-w-sm">
         <form action="#" method="POST" className="space-y-6">
           <div >
-            <div className="mt-2">
+            <div className="mt-3">
               <input
                 id="email"
                 name="email"
@@ -48,7 +48,7 @@ export default function LinkedinHomepage() {
                 placeholder="Search topic"
               />
             </div>
-            <div className="mt-2">
+            <div className="mt-3">
               <input
                 id="email"
                 name="email"
@@ -60,7 +60,7 @@ export default function LinkedinHomepage() {
                 placeholder="LinkedIn email"
               />
             </div>
-            <div className="mt-2">
+            <div className="mt-3">
               <input
                 id="password"
                 name="password"
@@ -86,12 +86,7 @@ export default function LinkedinHomepage() {
           </div>
         </form>
 
-        <p className="mt-10 text-center text-sm/6 text-gray-500">
-          Not a member?{' '}
-          <a href="#" className="font-semibold text-indigo-600 hover:text-indigo-500">
-            Start a 14 day free trial
-          </a>
-        </p>
+        
       </div>
     </div>
 
