@@ -4,8 +4,6 @@ import logging
 import json
 import os
 import requests
-import uuid
-import base64
 from urllib.parse import quote_plus
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -26,20 +24,16 @@ logging.basicConfig(
 )
 
 class LinkedInBot:
-    def __init__(self, email, password, access_token, search_query="agricultural technology"):
+    def __init__(self, email, password, access_token, person_id, search_query="agricultural technology"):
         self.email = email
         self.password = password
         self.access_token = access_token
+        self.person_id = person_id  # LinkedIn person URN ID
         self.search_query = search_query
         self.driver = None
         self.wait = None
         self.history_file = 'engagement_history.json'
         self.engagement_history = self._load_history()
-        self.image_dir = 'downloaded_images'
-        
-        # Create images directory if it doesn't exist
-        if not os.path.exists(self.image_dir):
-            os.makedirs(self.image_dir)
 
     def _load_history(self):
         if os.path.exists(self.history_file):
@@ -116,239 +110,164 @@ class LinkedInBot:
                 continue
         return best
 
-    def download_images(self, post):
-        """Extract and download images from the post"""
-        image_paths = []
+    def extract_images_from_post(self, post):
+        """Extract image URLs from a LinkedIn post"""
+        image_urls = []
         try:
-            # Find all images in the post
-            images = post.find_elements(By.CSS_SELECTOR, "div.feed-shared-image__container img, li.artdeco-carousel__slide img")
+            # Look for images in the post
+            image_elements = post.find_elements(By.CSS_SELECTOR, "div.feed-shared-image__container img")
+            if not image_elements:
+                # Try alternative selectors for carousel images
+                image_elements = post.find_elements(By.CSS_SELECTOR, "li.feed-shared-image-carousel__item img")
             
-            if not images:
-                logging.info("No images found in the post")
-                return []
-            
-            logging.info(f"Found {len(images)} images in the post")
-            
-            # Download each image
-            for i, img in enumerate(images):
-                try:
-                    img_url = img.get_attribute('src')
-                    # Skip LinkedIn default icons/avatars
-                    if not img_url or 'data:image' in img_url or 'ghost-person' in img_url:
-                        continue
-                    
-                    # Generate a unique filename
-                    img_filename = f"{self.image_dir}/{uuid.uuid4()}.jpg"
-                    
-                    # Download the image
-                    response = requests.get(img_url, stream=True)
-                    if response.status_code == 200:
-                        with open(img_filename, 'wb') as f:
-                            for chunk in response.iter_content(1024):
-                                f.write(chunk)
-                        image_paths.append(img_filename)
-                        logging.info(f"Downloaded image: {img_filename}")
-                    else:
-                        logging.error(f"Failed to download image: {response.status_code}")
-                except Exception as e:
-                    logging.error(f"Error downloading image: {e}")
-            
-            return image_paths
+            for img in image_elements:
+                src = img.get_attribute('src')
+                if src:
+                    image_urls.append(src)
+                    logging.info(f"Found image: {src[:50]}...")
         except Exception as e:
             logging.error(f"Error extracting images: {e}")
-            return []
+        
+        return image_urls
 
-    def upload_image_to_linkedin(self, image_path):
-        """Upload an image to LinkedIn and get the asset ID"""
+    def upload_image_to_linkedin_api(self, image_url):
+        """Upload an image directly from URL to LinkedIn API without downloading it first"""
         try:
-            # Register the upload
-            register_headers = {
+            # First, register the image upload
+            headers = {
                 'Authorization': f'Bearer {self.access_token}',
-                'Content-Type': 'application/json',
-                'X-Restli-Protocol-Version': '2.0.0'
+                'X-Restli-Protocol-Version': '2.0.0',
+                'Content-Type': 'application/json'
             }
             
-            register_data = {
-                "registerUploadRequest": {
-                    "recipes": ["urn:li:digitalmediaRecipe:feedshare-image"],
-                    "owner": "urn:li:person:uuser_id",  # Replace with your LinkedIn user ID
-                    "serviceRelationships": [
-                        {
-                            "relationshipType": "OWNER",
-                            "identifier": "urn:li:userGeneratedContent"
-                        }
-                    ]
+            register_upload_response = requests.post(
+                'https://api.linkedin.com/v2/assets?action=registerUpload',
+                headers=headers,
+                json={
+                    "registerUploadRequest": {
+                        "recipes": [
+                            "urn:li:digitalmediaRecipe:feedshare-image"
+                        ],
+                        "owner": f"urn:li:person:{self.person_id}",
+                        "serviceRelationships": [
+                            {
+                                "relationshipType": "OWNER",
+                                "identifier": "urn:li:userGeneratedContent"
+                            }
+                        ]
+                    }
                 }
-            }
+            )
             
-            register_url = "https://api.linkedin.com/v2/assets?action=registerUpload"
-            register_resp = requests.post(register_url, headers=register_headers, json=register_data)
-            
-            if register_resp.status_code != 200:
-                logging.error(f"Failed to register image upload: {register_resp.status_code} {register_resp.text}")
+            if register_upload_response.status_code != 200:
+                logging.error(f"Failed to register image upload: {register_upload_response.status_code} - {register_upload_response.text}")
                 return None
             
-            # Extract upload URL and asset ID
-            upload_data = register_resp.json()
-            upload_url = upload_data.get('value', {}).get('uploadMechanism', {}).get('com.linkedin.digitalmedia.uploading.MediaUploadHttpRequest', {}).get('uploadUrl')
+            upload_data = register_upload_response.json()
             asset_id = upload_data.get('value', {}).get('asset')
+            upload_url = upload_data.get('value', {}).get('uploadMechanism', {}).get('com.linkedin.digitalmedia.uploading.MediaUploadHttpRequest', {}).get('uploadUrl')
             
             if not upload_url or not asset_id:
                 logging.error("Failed to get upload URL or asset ID")
                 return None
-            
-            # Upload the image binary
-            with open(image_path, 'rb') as image_file:
-                image_data = image_file.read()
                 
-            upload_resp = requests.put(
+            # Now stream the image from original URL directly to LinkedIn
+            # First get the image data
+            image_response = requests.get(image_url)
+            if image_response.status_code != 200:
+                logging.error(f"Failed to get image from URL: {image_url}")
+                return None
+                
+            # Then upload it to LinkedIn
+            upload_response = requests.post(
                 upload_url,
-                data=image_data,
+                data=image_response.content,
                 headers={
                     'Authorization': f'Bearer {self.access_token}'
                 }
             )
             
-            if upload_resp.status_code not in (200, 201):
-                logging.error(f"Failed to upload image: {upload_resp.status_code} {upload_resp.text}")
+            if upload_response.status_code < 200 or upload_response.status_code >= 300:
+                logging.error(f"Failed to upload image: {upload_response.status_code} - {upload_response.text}")
                 return None
                 
             logging.info(f"Successfully uploaded image, asset ID: {asset_id}")
             return asset_id
             
         except Exception as e:
-            logging.error(f"Error uploading image: {e}")
+            logging.error(f"Error in image upload: {e}")
             return None
 
-    def create_post_with_images_api(self, text, image_paths):
-        """Create a LinkedIn post with text and images using the API"""
-        # First upload all images and collect their asset IDs
-        image_assets = []
-        for img_path in image_paths:
-            asset_id = self.upload_image_to_linkedin(img_path)
-            if asset_id:
-                image_assets.append(asset_id)
-        
+    def create_post_api(self, text, image_assets=None):
+        """Create a post via LinkedIn API with optional images"""
         headers = {
             'Authorization': f'Bearer {self.access_token}',
             'Content-Type': 'application/json',
             'X-Restli-Protocol-Version': '2.0.0'
         }
         
-        # Construct the post body based on whether we have images
-        if image_assets:
-            # Post with images
-            media_items = []
-            for i, asset in enumerate(image_assets):
-                media_items.append({
+        # Prepare the post content
+        post_request = {
+            "author": f"urn:li:person:{self.person_id}",
+            "lifecycleState": "PUBLISHED",
+            "specificContent": {
+                "com.linkedin.ugc.ShareContent": {
+                    "shareCommentary": {
+                        "text": text
+                    },
+                    "shareMediaCategory": "NONE"
+                }
+            },
+            "visibility": {
+                "com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC"
+            }
+        }
+        
+        # Add images if available
+        if image_assets and len(image_assets) > 0:
+            media_list = []
+            for asset_id in image_assets:
+                media_list.append({
                     "status": "READY",
                     "description": {
-                        "text": f"Image {i+1}"
+                        "text": "Image from reposted content"
                     },
-                    "media": asset,
+                    "media": asset_id,
                     "title": {
-                        "text": f"Image {i+1}"
+                        "text": "Reposted image"
                     }
                 })
             
-            body = {
-                "author": "urn:li:person:uuser_id",  # Replace with your LinkedIn user ID
-                "lifecycleState": "PUBLISHED",
-                "specificContent": {
-                    "com.linkedin.ugc.ShareContent": {
-                        "shareCommentary": {
-                            "text": text
-                        },
-                        "shareMediaCategory": "IMAGE",
-                        "media": media_items
-                    }
-                },
-                "visibility": {
-                    "com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC"
-                }
-            }
-        else:
-            # Text-only post
-            body = {
-                "author": "urn:li:person:uuser_id",  # Replace with your LinkedIn user ID
-                "lifecycleState": "PUBLISHED",
-                "specificContent": {
-                    "com.linkedin.ugc.ShareContent": {
-                        "shareCommentary": {
-                            "text": text
-                        },
-                        "shareMediaCategory": "NONE"
-                    }
-                },
-                "visibility": {
-                    "com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC"
-                }
-            }
+            if media_list:
+                post_request["specificContent"]["com.linkedin.ugc.ShareContent"]["shareMediaCategory"] = "IMAGE"
+                post_request["specificContent"]["com.linkedin.ugc.ShareContent"]["media"] = media_list
         
-        resp = requests.post('https://api.linkedin.com/v2/ugcPosts', headers=headers, json=body)
+        logging.info(f"Creating post with request: {json.dumps(post_request)}")
+        resp = requests.post('https://api.linkedin.com/v2/ugcPosts', headers=headers, json=post_request)
+        
         if resp.status_code == 201:
-            logging.info("API post created successfully with images")
-            # Clean up downloaded images after posting
-            for img_path in image_paths:
-                try:
-                    os.remove(img_path)
-                    logging.info(f"Deleted temporary image: {img_path}")
-                except:
-                    pass
+            post_id = resp.headers.get('X-RestLi-Id')
+            logging.info(f"API post created successfully with ID: {post_id}")
             return True
-        
-        logging.error(f"API post failed: {resp.status_code} {resp.text}")
+        logging.error(f"API post failed: {resp.status_code} - {resp.text}")
         return False
-
-    def get_author_details(self, post):
-        """Get more complete author details from the post"""
-        try:
-            # Get author name
-            author_name = post.find_element(By.CSS_SELECTOR, 
-                "div.update-components-actor__meta span.update-components-actor__title span").text
-            
-            # Get author headline/title if available
-            try:
-                author_title = post.find_element(By.CSS_SELECTOR, 
-                    "div.update-components-actor__meta span.update-components-actor__description").text
-            except:
-                author_title = ""
-                
-            # Get author profile URL if available
-            try:
-                author_link = post.find_element(By.CSS_SELECTOR, 
-                    "div.update-components-actor__meta a.app-aware-link").get_attribute("href")
-                # Extract just the profile name
-                if '/in/' in author_link:
-                    profile_name = author_link.split('/in/')[1].split('/')[0]
-                    author_link = f"linkedin.com/in/{profile_name}"
-            except:
-                author_link = ""
-                
-            author_detail = f"{author_name}"
-            if author_title:
-                author_detail += f", {author_title}"
-            if author_link:
-                author_detail += f" (linkedin.com/in/{profile_name})"
-                
-            return author_detail
-            
-        except Exception as e:
-            logging.error(f"Error getting author details: {e}")
-            return "Unknown LinkedIn User"
 
     def repost_once(self):
         post = self.find_top_post()
         if not post:
             logging.info("No post found to repost")
             return
-        
+            
         pid = post.get_attribute('data-urn') or post.get_attribute('id')
         
-        # Get detailed author information
-        author_info = self.get_author_details(post)
-        
-        # Expand text if needed
+        # author
+        try:
+            actor = post.find_element(By.CSS_SELECTOR,
+                "div.update-components-actor__meta span.update-components-actor__title span").text
+        except Exception:
+            actor = "Unknown"
+            
+        # expand text
         try:
             btn = post.find_element(By.CSS_SELECTOR, ".feed-shared-inline-show-more-text__see-more-less-toggle")
             self.driver.execute_script("arguments[0].click();", btn)
@@ -356,43 +275,50 @@ class LinkedInBot:
         except NoSuchElementException:
             pass
             
-        # Get post text
+        # text
         try:
             body = post.find_element(By.CSS_SELECTOR,
                 "div.feed-shared-update-v2__description span.break-words").text
         except Exception:
             body = ""
             
-        # Format content with clear author attribution
-        content = f"Repost from {author_info}:\n\n{body}"
+        content = f"Repost from {actor}:\n\n{body}"
         content = ''.join(ch for ch in content if ord(ch) <= 0xFFFF)
         
-        # Get images from the post
-        image_paths = self.download_images(post)
+        # Extract images
+        image_urls = self.extract_images_from_post(post)
+        image_assets = []
         
-        # Create post with images
-        if self.create_post_with_images_api(content, image_paths):
+        # Directly upload images to LinkedIn without downloading
+        for url in image_urls:
+            asset_id = self.upload_image_to_linkedin_api(url)
+            if asset_id:
+                image_assets.append(asset_id)
+
+        # Use API to post with images
+        if self.create_post_api(content, image_assets):
             now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             self.engagement_history['posts'].append({
                 'post_id': pid, 
-                'author': author_info, 
-                'timestamp': now,
-                'has_images': len(image_paths) > 0
+                'author': actor, 
+                'timestamp': now, 
+                'had_images': len(image_assets) > 0,
+                'image_count': len(image_assets)
             })
             self._save_history()
-            logging.info(f"Successfully reposted content from {author_info} with {len(image_paths)} images")
-        else:
-            logging.error("Failed to repost content")
-
+            
     def close(self):
         if self.driver:
             self.driver.quit()
 
 if __name__ == '__main__':
-    EMAIL = 'email'
-    PASSWORD = 'password'
-    TOKEN = 'access_token'  # Replace with your LinkedIn API access token
-    bot = LinkedInBot(EMAIL, PASSWORD, TOKEN)
+    # LinkedIn API credentials
+    EMAIL = 'your_email@example.com'
+    PASSWORD = 'your_password'
+    ACCESS_TOKEN = 'your_linkedin_access_token'  # OAuth 2.0 access token with w_member_social scope
+    PERSON_ID = 'your_linkedin_person_id'  # This is the numeric ID in your LinkedIn profile URL
+    
+    bot = LinkedInBot(EMAIL, PASSWORD, ACCESS_TOKEN, PERSON_ID)
     try:
         bot.setup_browser()
         if bot.login():
